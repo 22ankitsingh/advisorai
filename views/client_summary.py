@@ -25,7 +25,6 @@ import streamlit as st
 from services.summary_service import (
     SummaryService, SummaryResult, SUMMARY_TYPES, build_client_context
 )
-from portfolio.mock_data import CLIENTS
 from services.gemini_service import is_ai_available
 from utils.client_resolver import get_selected_client
 from utils.logger import get_logger
@@ -249,7 +248,7 @@ def _render_summary_tab(
     if do_generate:
         with st.spinner(
             f"{'Asking Gemini' if is_ai_available() else 'Building template'} "
-            f"for {CLIENTS[client_id]['name']}..."
+            f"for {ref.name}..."
         ):
             result = service.generate(client_id, summary_type)
             _set_cached(result, client_id, summary_type)
@@ -341,8 +340,8 @@ def render() -> None:
         st.info("👈 Please select a client from the sidebar to generate summaries.")
         return
 
-    client_id = ref.mock_key
-    client    = CLIENTS[client_id]
+    # Use mock_key for legacy demo clients; 'db:<id>' sentinel for DB-only clients
+    client_id = ref.mock_key if ref.mock_key else f"db:{ref.db_id}"
 
     # ── Client header ──────────────────────────────────────────────────────────
     col_name, col_ai_status = st.columns([3, 1])
@@ -351,10 +350,10 @@ def render() -> None:
             "conservative": "#2ed573",
             "moderate":     "#ffa502",
             "aggressive":   "#ff4757",
-        }.get(client["risk_profile"], "#a78bfa")
+        }.get(ref.risk_profile, "#a78bfa")
 
         st.markdown(
-            f"### 👤 {client['name']} "
+            f"### 👤 {ref.name} "
             f"<span style='background:{profile_colour}20; color:{profile_colour}; "
             f"padding:3px 12px; border-radius:20px; font-size:0.85rem; "
             f"font-weight:600; border:1px solid {profile_colour}50;'>"
@@ -410,7 +409,7 @@ def render() -> None:
             for stype in SUMMARY_TYPES:
                 result = service.generate(client_id, stype)
                 _set_cached(result, client_id, stype)
-        st.success(f"All 4 summaries generated for {client['name']}!")
+        st.success(f"All 4 summaries generated for {ref.name}!")
         st.rerun()
 
     # ── Clear cache button ────────────────────────────────────────────────────

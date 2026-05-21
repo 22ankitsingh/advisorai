@@ -1,17 +1,12 @@
 """
 pages/portfolio.py
 ───────────────────
-Portfolio analysis page — powered by Phase 3 analytics engine.
+Portfolio analysis page — Phase 6 upgrade: fully DB-driven.
 
-Data source: portfolio/mock_data.py (single source of truth)
+Data source: DB via PortfolioRepository (primary) + mock_data NAV fallback
+             for legacy demo clients that still have mock_key set.
 Analytics:   portfolio/analytics.py  — summary, allocation, performance, drift
 Risk:        portfolio/risk_engine.py — composite risk score, flags
-
-This replaces the original SQLite-based implementation which had:
-  - Duplicate metric calculations
-  - No Sharpe ratio / drawdown / rolling returns
-  - No risk scoring
-  - Inconsistent AUM values vs. other pages
 """
 
 from __future__ import annotations
@@ -21,7 +16,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 
-from portfolio.mock_data import get_holdings_df, get_nav_history, CLIENTS
 from portfolio.analytics import (
     portfolio_summary,
     allocation_by_class,
@@ -32,6 +26,7 @@ from portfolio.analytics import (
     drift_analysis,
 )
 from portfolio.risk_engine import compute_risk_report
+from database.repositories.portfolio_repository import PortfolioRepository
 from utils.client_resolver import get_selected_client
 from utils.helpers import (
     fmt_usd, fmt_pct, apply_dark_theme,
@@ -40,32 +35,84 @@ from utils.helpers import (
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+_port_repo = PortfolioRepository()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data loader (cached per client to avoid recomputing on every rerun)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_portfolio_data(client_id: str) -> dict:
+@st.cache_data(ttl=120, show_spinner=False)
+def _load_portfolio_data(db_id: int, mock_key: str | None, risk_profile: str) -> dict:
     """
-    Load and compute all portfolio data for a given mock_data client key.
-    Cached for 5 minutes — refreshes automatically without requiring a restart.
+    Load and compute all portfolio data for a client.
+
+    Holdings come from the DB (PortfolioRepository).  NAV history and drift
+    targets come from mock_data only when a mock_key is available.
 
     Args:
-        client_id: Key from portfolio.mock_data.CLIENTS (e.g. "sarah_mitchell").
+        db_id:        Client's integer ID in the DB.
+        mock_key:     Optional legacy mock_data key (None for new DB-only clients).
+        risk_profile: Client's risk profile string.
 
     Returns:
         Dict with keys: holdings, summary, alloc_class, alloc_sector,
         perf, rolling, drift, risk_report, top5.
     """
-    client   = CLIENTS[client_id]
-    holdings = get_holdings_df(client_id)
-    nav_df   = get_nav_history(client_id, weeks=52)
-    target   = client["target_allocation"]
+    import pandas as pd
+
+    # ── Holdings from DB ──────────────────────────────────────────────────────
+    portfolios = _port_repo.get_for_client(db_id)
+    if portfolios:
+        holdings = _port_repo.get_holdings_df(portfolios[0]["id"])
+    else:
+        holdings = pd.DataFrame()
+
+    # Fall back to mock_data holdings if DB is empty and client has a mock_key
+    if holdings.empty and mock_key:
+        from portfolio.mock_data import get_holdings_df as _mock_holdings
+        holdings = _mock_holdings(mock_key)
+
+    # ── NAV history (mock_data or empty) ─────────────────────────────────────
+    nav_df = pd.DataFrame()
+    if mock_key:
+        from portfolio.mock_data import get_nav_history
+        nav_df = get_nav_history(mock_key, weeks=52)
+
+    # ── Target allocation (mock_data or even-split fallback) ─────────────────
+    target: dict = {}
+    if mock_key:
+        from portfolio.mock_data import CLIENTS
+        target = CLIENTS.get(mock_key, {}).get("target_allocation", {})
+    if not target and not holdings.empty:
+        # Even split across all asset classes present
+        classes = holdings["asset_class"].unique()
+        share   = round(100 / len(classes), 1)
+        target  = {c: share for c in classes}
+
+    if holdings.empty:
+        empty = pd.DataFrame()
+        return {
+            "holdings":    empty,
+            "summary":     {"total_value":0,"total_cost":0,"total_gain_loss":0,
+                            "total_gain_pct":0,"num_positions":0,"num_asset_classes":0,
+                            "largest_position_weight":0,"cash_weight":0},
+            "alloc_class": empty,
+            "alloc_sector":empty,
+            "perf":        {},
+            "rolling":     {},
+            "drift":       empty,
+            "risk_report": compute_risk_report(pd.DataFrame(
+                columns=["ticker","asset_class","market_value","cost_basis",
+                         "gain_loss","gain_pct","weight","sector"]
+            ), "db_client", risk_profile=risk_profile),
+            "top5":        empty,
+        }
+
+    rr = compute_risk_report(holdings, mock_key or "db_client",
+                             risk_profile=risk_profile if not mock_key else None)
 
     return {
-        "client":      client,
         "holdings":    holdings,
         "summary":     portfolio_summary(holdings),
         "alloc_class": allocation_by_class(holdings),
@@ -73,7 +120,7 @@ def _load_portfolio_data(client_id: str) -> dict:
         "perf":        performance_metrics(nav_df),
         "rolling":     rolling_returns(nav_df),
         "drift":       drift_analysis(holdings, target),
-        "risk_report": compute_risk_report(holdings, client_id),
+        "risk_report": rr,
         "top5":        top_holdings(holdings, n=5),
     }
 
@@ -350,7 +397,7 @@ def _render_risk_flags(data: dict) -> None:
 def render() -> None:
     """Render the Portfolio Analysis page."""
     st.markdown("## 📊 Portfolio Analysis")
-    st.markdown("*Powered by Phase 3 analytics — Sharpe ratio, drawdown, risk scoring*")
+    st.markdown("*Powered by Phase 6 — DB-driven holdings, live analytics*")
     st.divider()
 
     ref = get_selected_client()
@@ -358,30 +405,30 @@ def render() -> None:
         st.info("👈 Please select a client from the sidebar to view their portfolio.")
         return
 
-    client_id = ref.mock_key
-
     with st.spinner("Loading portfolio analytics..."):
         try:
-            data = _load_portfolio_data(client_id)
+            data = _load_portfolio_data(ref.db_id, ref.mock_key, ref.risk_profile)
         except Exception as exc:
             st.error(f"Failed to load portfolio data: {exc}")
-            logger.error("Portfolio load failed for %s: %s", client_id, exc)
+            logger.error("Portfolio load failed for %s: %s", ref.db_id, exc)
             return
 
-    client = data["client"]
-    rr     = data["risk_report"]
-    pm     = data["perf"]
+    rr = data["risk_report"]
+    pm = data["perf"]
 
     # ── Client header ─────────────────────────────────────────────────────────
-    profile_colour = RISK_PROFILE_COLOURS.get(client["risk_profile"], "#a78bfa")
+    profile_colour = RISK_PROFILE_COLOURS.get(ref.risk_profile, "#a78bfa")
     st.markdown(
-        f"### 👤 {client['name']} "
+        f"### 👤 {ref.name} "
         f"<span style='background:{profile_colour}20; color:{profile_colour}; "
         f"padding:3px 12px; border-radius:20px; font-size:0.85rem; "
         f"font-weight:600; border:1px solid {profile_colour}50;'>"
-        f"{client['risk_profile'].title()} Risk</span>",
+        f"{ref.risk_profile.title()} Risk</span>",
         unsafe_allow_html=True,
     )
+    if data["holdings"].empty:
+        st.info("📂 No holdings found. Add holdings via **Portfolio Mgmt** to see analytics.")
+        return
 
     # ── KPI cards ─────────────────────────────────────────────────────────────
     _render_kpis(data)

@@ -77,6 +77,36 @@ class PortfolioRepository:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_for_client_by_mock_key(self, mock_key: str) -> list[dict]:
+        """
+        Return all portfolios for a client identified by their mock_data key.
+
+        Resolves the mock_key → client name via portfolio.mock_data.CLIENTS
+        and then looks up the DB client by name.
+        Returns an empty list if no client with that name is found.
+        """
+        try:
+            from portfolio.mock_data import CLIENTS
+            name = CLIENTS[mock_key]["name"]
+        except KeyError:
+            return []
+
+        with get_db_connection() as conn:
+            client_row = conn.execute(
+                "SELECT id FROM clients WHERE name = ?", (name,)
+            ).fetchone()
+            if not client_row:
+                return []
+            db_id = client_row["id"]
+            rows = conn.execute("""
+                SELECT p.id, p.client_id, p.name, p.total_value,
+                       p.created_at, p.updated_at
+                FROM portfolios p
+                WHERE p.client_id = ?
+                ORDER BY p.created_at ASC
+            """, (db_id,)).fetchall()
+        return [dict(r) for r in rows]
+
     def get_primary(self, client_id: int) -> Optional[dict]:
         """
         Return the first (primary) portfolio for a client.

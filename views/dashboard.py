@@ -77,15 +77,20 @@ def render() -> None:
     total_aum    = clients_df["aum"].sum()
     total_clients = len(clients_df)
     total_alerts = clients_df["open_alerts"].sum()
-    # Real avg return from analytics
+    # Avg gain from DB portfolio analytics (no mock_data dependency)
     try:
-        from portfolio.mock_data import CLIENTS, get_nav_history
-        from portfolio.analytics import performance_metrics
-        returns = [
-            performance_metrics(get_nav_history(cid, weeks=52)).get("annualised_return", 0)
-            for cid in CLIENTS
-        ]
-        avg_gain = round(sum(returns) / len(returns), 1) if returns else 0.0
+        from database.repositories.portfolio_repository import PortfolioRepository
+        from portfolio.analytics import portfolio_summary
+        pr = PortfolioRepository()
+        gains = []
+        for _, row in clients_df.iterrows():
+            ports = pr.get_for_client(int(row["id"]))
+            for p in ports:
+                df = pr.get_holdings_df(p["id"])
+                if not df.empty:
+                    s = portfolio_summary(df)
+                    gains.append(s["total_gain_pct"])
+        avg_gain = round(sum(gains) / len(gains), 1) if gains else 0.0
     except Exception:
         avg_gain = 0.0
 

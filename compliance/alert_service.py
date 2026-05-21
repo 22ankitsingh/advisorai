@@ -55,24 +55,48 @@ class AlertSummary:
 # Context builder
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_context(client_id: str) -> PortfolioContext:
-    """Assemble PortfolioContext from all data sources."""
-    client   = CLIENTS[client_id]
-    holdings = get_holdings_df(client_id)
-    nav_df   = get_nav_history(client_id, weeks=52)
-    target   = client["target_allocation"]
+def _build_context(client_id: str, db_client_id: int | None = None) -> PortfolioContext:
+    """
+    Assemble PortfolioContext from DB holdings (with mock_data fallback).
+
+    Args:
+        client_id:    mock_data key string (e.g. 'sarah_mitchell').
+        db_client_id: Integer DB id if known (avoids an extra lookup).
+    """
+    from database.repositories.portfolio_repository import PortfolioRepository
+    pr = PortfolioRepository()
+
+    # Try DB holdings first
+    holdings = pd.DataFrame()
+    if db_client_id:
+        ports = pr.get_for_client(db_client_id)
+        if ports:
+            holdings = pr.get_holdings_df(ports[0]["id"])
+
+    if holdings.empty and client_id in CLIENTS:
+        # Fall back to mock_data for demo clients
+        holdings = get_holdings_df(client_id)
+
+    client = CLIENTS.get(client_id, {})
+    nav_df = get_nav_history(client_id, weeks=52) if client_id in CLIENTS else pd.DataFrame()
+    target = client.get("target_allocation", {})
+
+    if not target and not holdings.empty:
+        classes = holdings["asset_class"].unique()
+        share   = round(100 / len(classes), 1)
+        target  = {c: share for c in classes}
 
     return PortfolioContext(
         client_id=client_id,
-        client_name=client["name"],
-        risk_profile=client["risk_profile"],
-        aum=holdings["market_value"].sum(),
+        client_name=client.get("name", client_id),
+        risk_profile=client.get("risk_profile", "moderate"),
+        aum=holdings["market_value"].sum() if not holdings.empty else 0.0,
         advisor_notes=client.get("advisor_notes", ""),
         holdings=holdings,
         target_allocation=target,
         perf_metrics=performance_metrics(nav_df),
         rolling_returns=rolling_returns(nav_df),
-        drift_df=drift_analysis(holdings, target),
+        drift_df=drift_analysis(holdings, target) if not holdings.empty and target else pd.DataFrame(),
     )
 
 
@@ -139,18 +163,20 @@ class AlertService:
         self,
         client_id:   str,
         persist:     bool = True,
+        db_client_id: int | None = None,
     ) -> AlertSummary:
         """
         Run all rules for one client and optionally persist violations.
 
         Args:
-            client_id: Key from portfolio.mock_data.CLIENTS.
-            persist:   If True, save new violations to compliance_alerts table.
+            client_id:    mock_data key OR 'db:<int>' for DB-only clients.
+            persist:      If True, save new violations to compliance_alerts table.
+            db_client_id: Integer DB id (avoids a name lookup in persist step).
 
         Returns:
             AlertSummary with counts and full RuleResult list.
         """
-        ctx     = _build_context(client_id)
+        ctx     = _build_context(client_id, db_client_id=db_client_id)
         results = self._engine.run(ctx)
 
         violations = [r for r in results if not r.passed]
@@ -180,13 +206,42 @@ class AlertService:
         )
 
     def run_for_all_clients(self, persist: bool = True) -> list[AlertSummary]:
-        """Run rules for every client in CLIENTS and return summaries."""
+        """Run rules for every client in the DB and return summaries."""
+        from services.database import get_db_connection as _gdb
+        # Build a name→mock_key reverse map for legacy clients
+        _name_to_mock_key = {v["name"]: k for k, v in CLIENTS.items()}
+
+        with _gdb() as conn:
+            rows = conn.execute(
+                "SELECT id, name FROM clients ORDER BY id"
+            ).fetchall()
+
         summaries = []
-        for client_id in CLIENTS:
+        for row in rows:
+            db_id    = row["id"]
+            name     = row["name"]
+            mock_key = _name_to_mock_key.get(name)
+            cid      = mock_key if mock_key else f"db:{db_id}"
             try:
-                summaries.append(self.run_for_client(client_id, persist=persist))
+                ctx     = _build_context(cid, db_client_id=db_id)
+                results = self._engine.run(ctx)
+                violations = [r for r in results if not r.passed]
+                new_saved  = self._persist_violations(ctx, violations) if persist and violations else 0
+                by_severity: dict[str, int] = {}
+                for r in violations:
+                    by_severity[r.severity] = by_severity.get(r.severity, 0) + 1
+                summaries.append(AlertSummary(
+                    client_id=cid,
+                    client_name=ctx.client_name,
+                    total_rules=len(results),
+                    violations=len(violations),
+                    passed=len(results) - len(violations),
+                    new_saved=new_saved,
+                    by_severity=by_severity,
+                    results=results,
+                ))
             except Exception as exc:
-                logger.error("Error running alerts for %s: %s", client_id, exc)
+                logger.error("Error running alerts for client %s: %s", db_id, exc)
         return summaries
 
     # ── Public: query alerts from DB ─────────────────────────────────────────

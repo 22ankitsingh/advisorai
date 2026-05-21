@@ -124,35 +124,96 @@ class SummaryResult:
 def build_client_context(client_id: str) -> ClientContext:
     """
     Assemble a complete ClientContext for a given client_id.
-    This is the single place where all data sources are joined.
+
+    Phase 6: Holdings are sourced from the DB first.
+    Falls back to mock_data.get_holdings_df() for legacy mock_key clients
+    when DB holdings are absent. NAV history always comes from mock_data
+    (no NAV table in DB yet).
 
     Args:
-        client_id: Key from portfolio.mock_data.CLIENTS.
+        client_id: mock_data key OR db:<int> for DB-only clients.
 
     Returns:
         ClientContext with all analytics pre-computed.
     """
-    client   = CLIENTS[client_id]
-    holdings = get_holdings_df(client_id)
-    nav_df   = get_nav_history(client_id, weeks=52)
+    # ── Resolve client metadata ───────────────────────────────────────────────────────────
+    if client_id.startswith("db:"):
+        # DB-only client
+        db_id = int(client_id[3:])
+        mock_key = None
+        from database.repositories.client_repository import ClientRepository
+        db_client = ClientRepository().get_by_id(db_id) or {}
+        name          = db_client.get("name", "Unknown")
+        email         = db_client.get("email", "")
+        risk_profile  = db_client.get("risk_profile", "moderate")
+        advisor_notes = db_client.get("advisor_notes", "")
+        target: dict  = {}
+    else:
+        # Legacy mock_data client
+        mock_key = client_id
+        db_id    = None
+        client   = CLIENTS[client_id]
+        name          = client["name"]
+        email         = client.get("email", "")
+        risk_profile  = client["risk_profile"]
+        advisor_notes = client.get("advisor_notes", "")
+        target        = client["target_allocation"]
 
-    target   = client["target_allocation"]
+    # ── Holdings: DB first, mock_data fallback ───────────────────────────────────────
+    from database.repositories.portfolio_repository import PortfolioRepository
+    pr        = PortfolioRepository()
+    holdings  = pd.DataFrame()
+
+    if db_id:
+        ports = pr.get_for_client(db_id)
+        if ports:
+            holdings = pr.get_holdings_df(ports[0]["id"])
+    elif mock_key:
+        ports = pr.get_for_client_by_mock_key(mock_key)
+        if ports:
+            holdings = pr.get_holdings_df(ports[0]["id"])
+
+    if holdings.empty and mock_key:
+        holdings = get_holdings_df(mock_key)
+
+    # ── NAV history (mock_data or empty) ───────────────────────────────────────
+    nav_df = pd.DataFrame()
+    if mock_key:
+        nav_df = get_nav_history(mock_key, weeks=52)
+
+    # ── Target allocation fallback ───────────────────────────────────────────────
+    if not target and not holdings.empty:
+        classes = holdings["asset_class"].unique()
+        share   = round(100 / len(classes), 1)
+        target  = {c: share for c in classes}
+
+    # ── Risk report ───────────────────────────────────────────────────────────────
+    rr = compute_risk_report(
+        holdings if not holdings.empty else pd.DataFrame(
+            columns=["ticker","asset_class","market_value","cost_basis",
+                     "gain_loss","gain_pct","weight","sector"]
+        ),
+        mock_key or "db_client",
+        risk_profile=risk_profile if not mock_key else None,
+    )
 
     return ClientContext(
         client_id=client_id,
-        name=client["name"],
-        email=client["email"],
-        risk_profile=client["risk_profile"],
-        advisor_notes=client.get("advisor_notes", ""),
+        name=name,
+        email=email,
+        risk_profile=risk_profile,
+        advisor_notes=advisor_notes,
         holdings=holdings,
-        summary=portfolio_summary(holdings),
-        alloc_class=allocation_by_class(holdings),
-        alloc_sector=allocation_by_sector(holdings),
-        top5=top_holdings(holdings, n=5),
-        drift=drift_analysis(holdings, target),
-        perf_metrics=performance_metrics(nav_df),
-        rolling=rolling_returns(nav_df),
-        risk_report=compute_risk_report(holdings, client_id),
+        summary=portfolio_summary(holdings) if not holdings.empty else
+            {"total_value":0,"total_cost":0,"total_gain_loss":0,"total_gain_pct":0,
+             "num_positions":0,"num_asset_classes":0,"largest_position_weight":0,"cash_weight":0},
+        alloc_class=allocation_by_class(holdings) if not holdings.empty else pd.DataFrame(),
+        alloc_sector=allocation_by_sector(holdings) if not holdings.empty else pd.DataFrame(),
+        top5=top_holdings(holdings, n=5) if not holdings.empty else pd.DataFrame(),
+        drift=drift_analysis(holdings, target) if not holdings.empty and target else pd.DataFrame(),
+        perf_metrics=performance_metrics(nav_df) if not nav_df.empty else {},
+        rolling=rolling_returns(nav_df) if not nav_df.empty else {},
+        risk_report=rr,
     )
 
 

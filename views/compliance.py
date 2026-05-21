@@ -83,7 +83,8 @@ def _render_scan_section(ref) -> None:
                 use_container_width=True, key="btn_scan_client",
             ):
                 with st.spinner(f"Scanning {ref.name}..."):
-                    summary = svc.run_for_client(ref.mock_key, persist=True)
+                    cid = ref.mock_key if ref.mock_key else f"db:{ref.db_id}"
+                    summary = svc.run_for_client(cid, persist=True, db_client_id=ref.db_id)
                 if summary.violations:
                     sev_text = ", ".join(f"{v} {k}" for k, v in summary.by_severity.items())
                     st.warning(

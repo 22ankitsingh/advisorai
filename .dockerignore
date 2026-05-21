@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+*.egg-link
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files (never bake secrets into the image)
+.env
+.env.local
+.env.*.local
+
+# Data & logs (mounted as volumes at runtime)
+data/
+logs/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Git
+.git/
+.gitignore

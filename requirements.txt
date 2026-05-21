@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Advisor AI — Python Dependencies
+# Install: pip install -r requirements.txt
+# Python >= 3.10 required
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── UI ────────────────────────────────────────────────────────────────────────
+streamlit>=1.35.0
+
+# ── Google Gemini (LLM) ───────────────────────────────────────────────────────
+google-generativeai>=0.7.2          # Core Gemini SDK
+
+# ── RAG Pipeline ─────────────────────────────────────────────────────────────
+pypdf>=4.0.0                        # PDF text extraction
+sentence-transformers>=2.7.0        # Local embedding model (all-MiniLM-L6-v2)
+chromadb>=0.5.3                     # Local vector database with persistence
+
+# ── Data & Charts ─────────────────────────────────────────────────────────────
+pandas>=2.2.2
+plotly>=5.22.0
+numpy>=1.26.4
+
+# ── Environment ───────────────────────────────────────────────────────────────
+python-dotenv>=1.0.1

@@ -222,6 +222,7 @@ _init_session_state()
 NAV_ITEMS: list[tuple[str, str]] = [
     ("🏠  Dashboard",       "Dashboard"),
     ("👥  Clients",         "ClientManagement"),
+    ("📁  Portfolio Mgmt",  "PortfolioManagement"),
     ("💬  AI Chat",         "Chat"),
     ("📊  Portfolio",       "Portfolio"),
     ("📋  Client Summary",  "ClientSummary"),
@@ -377,6 +378,9 @@ elif page == "Compliance":
     render()
 elif page == "ClientManagement":
     from views.client_management import render
+    render()
+elif page == "PortfolioManagement":
+    from views.portfolio_management import render
     render()
 else:
     st.error(f"Unknown page: {page!r}. Please use the sidebar to navigate.")

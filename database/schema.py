@@ -1,0 +1,236 @@
+"""
+database/schema.py
+───────────────────
+Full schema definition and migration-safe initialisation.
+
+Design principles:
+  1. Every CREATE TABLE uses IF NOT EXISTS — safe to call on every startup.
+  2. New columns are added via _add_column_if_missing() — no data loss.
+  3. The transactions and chat_sessions tables are new additions.
+  4. All existing tables (clients, portfolios, holdings, chat_history,
+     compliance_alerts, audit_log) are preserved exactly as-is.
+  5. Indexes are created for all foreign-key columns.
+
+Call init_database() once at startup (app.py already does this via seed_all).
+"""
+
+from __future__ import annotations
+
+from database.connection import get_db_connection
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: safe column addition
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _add_column_if_missing(
+    conn,
+    table: str,
+    column: str,
+    col_definition: str,
+) -> bool:
+    """
+    Add a column to a table only if it does not already exist.
+
+    Args:
+        conn:           Open SQLite connection.
+        table:          Table name.
+        column:         Column name to add.
+        col_definition: SQL fragment, e.g. "TEXT DEFAULT NULL".
+
+    Returns:
+        True if the column was added, False if it already existed.
+    """
+    existing = [
+        row[1]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    ]
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_definition}")
+        logger.info("Migration: added column '%s.%s'", table, column)
+        return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core schema (all CREATE TABLE IF NOT EXISTS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CORE_SCHEMA = """
+-- ── clients ────────────────────────────────────────────────────────────────
+--   Full name split added; age and investment_goal are Phase 2 additions.
+CREATE TABLE IF NOT EXISTS clients (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT    NOT NULL,          -- display name (legacy)
+    email            TEXT    UNIQUE NOT NULL,
+    phone            TEXT,
+    risk_profile     TEXT    NOT NULL DEFAULT 'moderate',
+    aum              REAL    NOT NULL DEFAULT 0.0,
+    advisor_notes    TEXT,
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── portfolios ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS portfolios (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id        INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    name             TEXT    NOT NULL DEFAULT 'Main Portfolio',
+    total_value      REAL    NOT NULL DEFAULT 0.0,
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── holdings ────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS holdings (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id     INTEGER NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    ticker           TEXT    NOT NULL,
+    asset_name       TEXT    NOT NULL,
+    asset_class      TEXT    NOT NULL,  -- equity|bond|etf|cash|alternative
+    quantity         REAL    NOT NULL DEFAULT 0.0,
+    avg_cost         REAL    NOT NULL DEFAULT 0.0,
+    current_price    REAL    NOT NULL DEFAULT 0.0,
+    sector           TEXT,
+    target_allocation REAL   DEFAULT NULL,  -- % target weight for this holding
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── transactions ─────────────────────────────────────────────────────────────
+--   NEW: records every buy/sell/deposit/withdrawal per portfolio.
+CREATE TABLE IF NOT EXISTS transactions (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id     INTEGER NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    ticker           TEXT    NOT NULL,
+    transaction_type TEXT    NOT NULL DEFAULT 'buy',  -- buy|sell|deposit|withdrawal
+    quantity         REAL    NOT NULL DEFAULT 0.0,
+    price            REAL    NOT NULL DEFAULT 0.0,
+    transaction_date TEXT    NOT NULL DEFAULT (date('now')),
+    notes            TEXT,
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── chat_sessions ────────────────────────────────────────────────────────────
+--   NEW: one row per conversation session (groups chat messages).
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_uuid     TEXT    NOT NULL UNIQUE,   -- UUID generated by the app
+    client_id        INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+    title            TEXT,                      -- auto-generated or user-set
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── chat_history ─────────────────────────────────────────────────────────────
+--   Preserved exactly.  session_id links to chat_sessions.session_uuid.
+CREATE TABLE IF NOT EXISTS chat_history (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id       TEXT    NOT NULL,
+    role             TEXT    NOT NULL,   -- user|assistant
+    content          TEXT    NOT NULL,
+    client_id        INTEGER REFERENCES clients(id),
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── compliance_alerts ────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS compliance_alerts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id        INTEGER REFERENCES clients(id),
+    alert_type       TEXT    NOT NULL,
+    severity         TEXT    NOT NULL DEFAULT 'medium',
+    title            TEXT    NOT NULL,
+    description      TEXT    NOT NULL,
+    is_resolved      INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    resolved_at      TEXT
+);
+
+-- ── audit_log ────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS audit_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type       TEXT    NOT NULL,
+    client_id        INTEGER REFERENCES clients(id),
+    client_name      TEXT,
+    rule_id          TEXT,
+    severity         TEXT,
+    summary          TEXT    NOT NULL,
+    detail           TEXT,
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Indexes
+# ─────────────────────────────────────────────────────────────────────────────
+
+_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_portfolios_client_id   ON portfolios(client_id);
+CREATE INDEX IF NOT EXISTS idx_holdings_portfolio_id  ON holdings(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_holdings_ticker        ON holdings(ticker);
+CREATE INDEX IF NOT EXISTS idx_transactions_portfolio ON transactions(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_date      ON transactions(transaction_date);
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_client   ON chat_sessions(client_id);
+CREATE INDEX IF NOT EXISTS idx_chat_history_session   ON chat_history(session_id);
+CREATE INDEX IF NOT EXISTS idx_chat_history_client    ON chat_history(client_id);
+CREATE INDEX IF NOT EXISTS idx_compliance_client      ON compliance_alerts(client_id);
+CREATE INDEX IF NOT EXISTS idx_compliance_resolved    ON compliance_alerts(is_resolved);
+CREATE INDEX IF NOT EXISTS idx_audit_event_type       ON audit_log(event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_client_id        ON audit_log(client_id);
+CREATE INDEX IF NOT EXISTS idx_audit_created_at       ON audit_log(created_at);
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Column migrations (additive only — never drops)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    # (table, column, sql_definition)
+    # Phase 2: richer client profile
+    ("clients", "age",              "INTEGER DEFAULT NULL"),
+    ("clients", "investment_goal",  "TEXT    DEFAULT NULL"),
+    ("clients", "full_name",        "TEXT    DEFAULT NULL"),
+    # Holdings: optional target allocation per holding
+    ("holdings", "target_allocation", "REAL DEFAULT NULL"),
+    # Transactions: notes field
+    ("transactions", "notes",       "TEXT DEFAULT NULL"),
+    # Chat sessions: title field
+    ("chat_sessions", "title",      "TEXT DEFAULT NULL"),
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────────────────
+
+def init_database() -> None:
+    """
+    Initialise the database schema.
+
+    Safe to call on every app startup:
+      1. Creates all tables (IF NOT EXISTS).
+      2. Creates all indexes (IF NOT EXISTS).
+      3. Runs additive column migrations.
+
+    This replaces the old services/database.py init_database() and is
+    backward-compatible — existing data is never touched.
+    """
+    logger.info("Initialising database schema...")
+
+    with get_db_connection() as conn:
+        # 1. Core tables
+        conn.executescript(_CORE_SCHEMA)
+
+        # 2. Indexes
+        conn.executescript(_INDEXES)
+
+        # 3. Column migrations (additive only)
+        for table, column, col_def in _COLUMN_MIGRATIONS:
+            _add_column_if_missing(conn, table, column, col_def)
+
+    logger.info("Database schema ready.")

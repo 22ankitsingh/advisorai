@@ -228,6 +228,7 @@ NAV_ITEMS: list[tuple[str, str]] = [
     ("📋  Client Summary",  "ClientSummary"),
     ("🔍  Research",        "Research"),
     ("⚠️  Compliance",      "Compliance"),
+    ("📋  Audit Log",       "AuditLog"),
 ]
 
 
@@ -381,6 +382,9 @@ elif page == "ClientManagement":
     render()
 elif page == "PortfolioManagement":
     from views.portfolio_management import render
+    render()
+elif page == "AuditLog":
+    from views.audit_logs import render
     render()
 else:
     st.error(f"Unknown page: {page!r}. Please use the sidebar to navigate.")
